@@ -20,10 +20,15 @@ VerboseStateFactory: false
 robots:
   ground:
     module: env/ground
+  wall:
+    module: env/ground
+    init_pos:
+      translation: [0.15, -0.7, 0.0]
+      rotation: [-1.57, -0.0, 0.0]
 # General constraints, always on
 constraints:
 - type: contact
-- type: dynamics
+#- type: dynamics
   damper: [0.1, 0.01, 0.5]
 - type: compoundJoint
 # Collision constraint
@@ -35,12 +40,14 @@ contacts:
 - r2: ground
   r1Surface: LeftFoot
   r2Surface: AllGround
+  dof: [1,1,1,1,1,1]
 - r2: ground
   r1Surface: RightFoot
   r2Surface: AllGround
+  dof: [1,1,1,1,1,1]
 
 # Some options for a specific robot
-jvrc1:
+rhp7:
   posture:
     stiffness: 1
     weight: 10
@@ -48,9 +55,135 @@ jvrc1:
     stiffness: 2
     weight: 100
 # Implement some additional text states
-states: {}
+states: 
+  # Keep the CoM centered between the feet, and the chest and base upright
+  StandingBase:
+    base: MetaTasks
+    tasks:
+      CoM:
+        type: com
+        above: [LeftFoot, RightFoot]      
+        weight: 1000
+        stiffness: 5
+      KeepTorso:
+        type: orientation
+        body: CHEST_P_LINK
+        weight: 500
+        stiffness: 1
+      KeepBase:
+        type: orientation
+        body: BODY
+        weight: 500
+        stiffness: 1
+  # Trajectory to bring the right hand close to the wall
+  RightHandToWall:
+    base: StandingBase
+    tasks:
+      RightHandTrajectory:
+        type: bspline_trajectory
+        setupMode: false
+        surface: RightHand
+        weight: 1000
+        stiffness: 50
+        duration: 2.0
+        dimWeight: [1, 1, 1, 1, 0.5, 0.5]
+        displaySamples: 100
+        target:
+          translation: [0.15, -0.6, 1]
+          rotation: [-1.7, -0.0, 0.0] #rotation: [0.0, -1.7, 0.0]
+        # controlPoints: [[0.0, -0.5, 0.85]]
+        # oriWaypoints: [0.75, [0.147, -0.618, -0.179]]
+        completion:
+          timeElapsed: true
+# Right Hand reaching the wall and making contact
+  RightHand::ContactWithConstantVel:
+    base: StandingBase
+    tasks:
+      RightHandContactConstantVelocity:
+        type: bspline_trajectory
+        setupMode: false
+        surface: RightHand
+        stiffness: 50
+        duration: 3.5
+        weight: 1000
+        dimWeight: [1, 1, 1, 1, 0.5, 0.5]
+        displaySamples: 100
+        target:
+          translation: [0.15, -0.8, 1]
+          rotation: [-1.7, -0.0, 0.0]
+        completion:
+          timeElapsed: true
+          # wrench:
+          #   couple: [.NaN, .NaN, .NaN]
+          #   force: [28.0, 20.0, 20.0]
+
+  RightHand::Admittance:
+    base: StandingBase
+    tasks:
+      RightHandAdmittance:
+        type: admittance
+        surface: RightHand
+        # Tracks the forces along the normal axis of the gripper surface with an admittance coefficient of 0.001
+        # Note the high-damping and low stiffness on that axis.
+        # All other axis are position controlled and will keep the current gripper position as much as possible
+        admittance: [0,0,0,0,0,0.001]
+        stiffness: [10, 10, 10, 10, 10, 1]
+        damping: [6.3, 6.3, 6.3, 6.3, 6.3, 300]
+        maxVel:
+          linear: [0.2, 0.2, 0.5]
+          angular: [0.2, 0.2, 0.2]
+        # Target a desired force of 20N along the Z axis of the gripper surface
+        wrench:
+         force: [0, 0, -30]
+         couple: [0, 0, 0]
+        # Rotate the gripper such that the fingers point towards the wall
+        # targetRotation: [1.57, 0, 1.57]
+        # The task will complete one a force of 30N has been reached. All other axes are ignored.
+        completion:
+          wrench:
+            force: [.nan, .nan, 30]
+            couple: [.nan, .nan, .nan]
+  # Regulate force to 30N for 3 seconds
+  RightHandKeepAdmittance:
+    base: Parallel
+    states: [RightHand::Admittance, Pause]
+    configs:
+      Pause:
+        duration: 3
+
+  RightHand::Contact:
+    base: StandingBase
+    AddContacts:
+      - r1: rhp7
+        r2: wall
+        r1Surface: RightHand
+        r2Surface: AllGround
+        dof: [1, 1, 1, 1, 1, 1]
+
 # Transitions map
 transitions:
-- [SagittalWall_Initial, OK, SagittalWall_Initial, Strict]
+- [SagittalWall_Initial,                         OK, RightHandToWall, Auto]
+- [RightHandToWall,                              OK, RightHand::ContactWithConstantVel, Auto]
+- [RightHand::ContactWithConstantVel,            OK, RightHand::Contact, Auto]
+# - [RightHand::Admittance,                        OK, RightHandKeepAdmittance, Auto]
+# - [RightHandKeepAdmittance,                      OK, RightHand::Contact, Auto]
 # Initial state
 init: SagittalWall_Initial
+
+#Observer Pipelines
+ObserverPipelines:
+  name: "KaleidoObserverPipeline"
+  gui: true
+  observers:
+    - type: Encoder
+    - type: Attitude
+      required: false
+      config:
+        KalmanFilter:
+          gyr_cov: 0.000001
+    - type: KinematicInertial
+      config:
+        anchorFrame:
+          maxAnchorFrameDiscontinuity: 0.02
+    - type: BodySensor
+      update: false
